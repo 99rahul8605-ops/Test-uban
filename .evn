@@ -1,0 +1,7 @@
+BOT_TOKEN=your_bot_token_here
+CHANNEL_ID=your_channel_id_here
+WEBHOOK_URL=https://your-domain.com
+PORT=10000
+LOG_LEVEL=INFO
+DEVELOPMENT=false
+USE_WEBHOOK=true
