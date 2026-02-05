@@ -1,23 +1,23 @@
-# app.py - Merged Telegram Unban Bot
+# app.py - Telegram Unban Bot with Enhanced Debugging
 import logging
 import asyncio
 import threading
 import os
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional
 from datetime import datetime
 from flask import Flask, request, jsonify
 from waitress import serve
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
 # ========== Load Environment Variables ==========
 load_dotenv()
 
-# ========== Configuration Class ==========
+# ========== Configuration ==========
 class Config:
-    """Centralized configuration management."""
+    """Configuration management."""
     
     # Bot Configuration
     BOT_TOKEN = os.getenv('BOT_TOKEN', '').strip()
@@ -25,52 +25,62 @@ class Config:
     # Channel Configuration
     CHANNEL_ID = os.getenv('CHANNEL_ID', '').strip()
     if CHANNEL_ID:
-        CHANNEL_ID = int(CHANNEL_ID)
-    
-    # Webhook Configuration
-    WEBHOOK_URL = os.getenv('WEBHOOK_URL', '').strip()
-    WEBHOOK_PATH = f"/{BOT_TOKEN}" if BOT_TOKEN else "/webhook"
+        try:
+            CHANNEL_ID = int(CHANNEL_ID)
+        except ValueError:
+            print(f"❌ ERROR: CHANNEL_ID must be a number, got '{CHANNEL_ID}'")
+            sys.exit(1)
     
     # Server Configuration
     PORT = int(os.getenv('PORT', 10000))
     HOST = os.getenv('HOST', '0.0.0.0')
     
-    # Performance Configuration
-    POOL_SIZE = int(os.getenv('POOL_SIZE', 4))
-    MAX_CONNECTIONS = int(os.getenv('MAX_CONNECTIONS', 100))
+    # Webhook Configuration
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL', '').strip()
+    WEBHOOK_PATH = f"/{BOT_TOKEN}" if BOT_TOKEN else "/webhook"
     
-    # Logging Configuration
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
-    LOG_FILE = os.getenv('LOG_FILE', '/app/logs/bot.log')
-    
-    # Feature Flags
-    USE_WEBHOOK = os.getenv('USE_WEBHOOK', 'false').lower() == 'true'
+    # Mode
     DEVELOPMENT = os.getenv('DEVELOPMENT', 'false').lower() == 'true'
     
     @classmethod
-    def validate(cls) -> bool:
-        """Validate configuration and return True if valid."""
+    def validate(cls):
+        """Validate configuration."""
         errors = []
         
         if not cls.BOT_TOKEN:
-            errors.append("BOT_TOKEN is required")
+            errors.append("BOT_TOKEN is required (get from @BotFather)")
         
         if not cls.CHANNEL_ID:
-            errors.append("CHANNEL_ID is required")
+            errors.append("CHANNEL_ID is required (must be a number)")
+        
+        if cls.BOT_TOKEN and not cls.BOT_TOKEN.startswith('bot'):
+            if ':' not in cls.BOT_TOKEN:
+                errors.append("BOT_TOKEN format incorrect. Should be like: 1234567890:ABCdefGhIJKlmNoPQRsTUVwxyZ")
         
         if errors:
             print("❌ Configuration errors:")
             for error in errors:
                 print(f"   - {error}")
+            print("\n📝 Setup instructions:")
+            print("1. Create bot: @BotFather → /newbot")
+            print("2. Get channel ID: Add @userinfobot to channel, send /start")
+            print("3. Add bot as admin in channel with ban permissions")
             return False
         
         print("✅ Configuration validated!")
         print(f"🤖 Bot Token: {cls.BOT_TOKEN[:10]}...")
         print(f"📢 Channel ID: {cls.CHANNEL_ID}")
         print(f"🌐 Port: {cls.PORT}")
-        print(f"⚡ Pool Size: {cls.POOL_SIZE}")
         print(f"🔧 Mode: {'Development' if cls.DEVELOPMENT else 'Production'}")
-        print(f"🌐 Webhook: {'Enabled' if cls.USE_WEBHOOK and cls.WEBHOOK_URL else 'Disabled'}")
+        
+        # Test bot token
+        try:
+            bot = Bot(cls.BOT_TOKEN)
+            bot_info = asyncio.run(bot.get_me())
+            print(f"✅ Bot connected: @{bot_info.username} ({bot_info.id})")
+        except Exception as e:
+            print(f"❌ Failed to connect to bot: {e}")
+            return False
         
         return True
 
@@ -79,36 +89,23 @@ if not Config.validate():
     sys.exit(1)
 
 # ========== Logging Setup ==========
-def setup_logging():
-    """Configure logging with proper formatting and handlers."""
-    
-    # Create logs directory if it doesn't exist
-    log_dir = os.path.dirname(Config.LOG_FILE)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    
-    # Configure logging
-    logging.basicConfig(
-        level=getattr(logging, Config.LOG_LEVEL, logging.INFO),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(Config.LOG_FILE, encoding='utf-8')
-        ]
-    )
-    
-    # Suppress noisy logs
-    logging.getLogger('httpx').setLevel(logging.WARNING)
-    logging.getLogger('telegram').setLevel(logging.INFO)
-    
-    return logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.DEBUG if Config.DEVELOPMENT else logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('/app/logs/bot.log', encoding='utf-8')
+    ]
+)
 
-logger = setup_logging()
+# Set specific log levels
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
 
 # ========== Flask Application ==========
 app = Flask(__name__)
-app.config['JSON_SORT_KEYS'] = False
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 
 # ========== Global State ==========
 application: Optional[Application] = None
@@ -118,13 +115,13 @@ event_loop: Optional[asyncio.AbstractEventLoop] = None
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
     user = update.effective_user
-    logger.info(f"Start from user {user.id}")
+    logger.info(f"Start command from user {user.id}")
     
     message = (
         f"👋 Hi {user.mention_html()}!\n\n"
         f"🤖 <b>Unban Bot Active</b>\n\n"
         f"📋 <b>Commands:</b>\n"
-        f"• /start - Start bot\n"
+        f"• /start - Show this message\n"
         f"• /help - Help guide\n"
         f"• /unban [ID] - Unban user\n\n"
         f"🎯 <b>How to use:</b>\n"
@@ -133,7 +130,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"3. I'll unban them\n\n"
         f"⚡ <b>Quick unban:</b>\n"
         f"Just send: <code>123456789</code>\n\n"
-        f"📢 Channel ID: <code>{Config.CHANNEL_ID}</code>"
+        f"📢 <b>Channel ID:</b> <code>{Config.CHANNEL_ID}</code>\n"
+        f"🔧 <b>Bot Status:</b> ✅ Active"
     )
     
     await update.message.reply_html(message)
@@ -150,16 +148,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Get user ID from @userinfobot\n"
         "2. Send: <code>/unban 123456789</code>\n"
         "OR just send the ID\n\n"
-        "⚠️ <b>Note:</b> I must be an admin in your channel!"
+        "⚠️ <b>Important:</b>\n"
+        "• I must be an admin in your channel\n"
+        "• I need 'Ban Users' permission\n"
+        "• Channel ID must be correct\n\n"
+        f"🔧 <b>Current Channel:</b> <code>{Config.CHANNEL_ID}</code>"
     )
     await update.message.reply_html(help_text)
 
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /unban command."""
+    logger.info(f"Unban command from {update.effective_user.id}")
+    
     if not context.args:
         await update.message.reply_html(
             "❌ <b>Usage:</b> <code>/unban USER_ID</code>\n"
-            "Example: <code>/unban 123456789</code>"
+            "Example: <code>/unban 123456789</code>\n\n"
+            "Get user ID from @userinfobot"
         )
         return
     
@@ -169,6 +174,9 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle direct messages."""
     text = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    logger.info(f"Message from {user_id}: {text}")
     
     if not text:
         return
@@ -180,118 +188,128 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html(
             "❌ Send a valid User ID (numbers only)\n"
             "Example: <code>123456789</code>\n"
-            "Get ID from @userinfobot"
+            "Get ID from @userinfobot\n\n"
+            "Or use: <code>/unban 123456789</code>"
         )
 
 async def process_unban(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
     """Process unban request."""
     try:
         user_id_int = int(user_id)
-        logger.info(f"Unbanning user {user_id_int}")
+        chat_id = update.effective_chat.id
         
-        # Attempt to unban with timeout
-        try:
-            await asyncio.wait_for(
-                context.bot.unban_chat_member(
-                    chat_id=Config.CHANNEL_ID,
-                    user_id=user_id_int,
-                    only_if_banned=True
-                ),
-                timeout=15.0
-            )
-            
-            await update.message.reply_html(
-                f"✅ <b>Successfully Unbanned!</b>\n\n"
-                f"👤 User ID: <code>{user_id}</code>\n"
-                f"📢 Channel: <code>{Config.CHANNEL_ID}</code>"
-            )
-            logger.info(f"Unbanned user {user_id_int}")
-            
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout unbanning user {user_id_int}")
-            await update.message.reply_html(
-                "⚠️ <b>Operation timed out!</b>\n"
-                "The server took too long to respond. Please try again."
-            )
-            
+        logger.info(f"Attempting to unban user {user_id_int} from channel {Config.CHANNEL_ID}")
+        
+        # Send processing message
+        processing_msg = await update.message.reply_html(
+            f"🔄 <b>Processing...</b>\n"
+            f"User: <code>{user_id}</code>\n"
+            f"Channel: <code>{Config.CHANNEL_ID}</code>"
+        )
+        
+        # Unban the user
+        result = await context.bot.unban_chat_member(
+            chat_id=Config.CHANNEL_ID,
+            user_id=user_id_int,
+            only_if_banned=True
+        )
+        
+        logger.info(f"Unban result: {result}")
+        
+        # Edit the processing message with success
+        await processing_msg.edit_text(
+            f"✅ <b>Successfully Unbanned!</b>\n\n"
+            f"👤 User ID: <code>{user_id}</code>\n"
+            f"📢 Channel: <code>{Config.CHANNEL_ID}</code>\n\n"
+            f"🎉 The user can now join the channel again.",
+            parse_mode='HTML'
+        )
+        
     except ValueError:
         await update.message.reply_html(
-            "❌ <b>Invalid User ID!</b>\n"
-            "User ID must contain only numbers."
+            "❌ <b>Invalid User ID!</b>\n\n"
+            "User ID must contain only numbers.\n"
+            "Example: <code>123456789</code>"
         )
     except Exception as e:
-        error_msg = str(e).lower()
+        error_msg = str(e)
         logger.error(f"Unban error: {error_msg}")
         
-        if "not enough rights" in error_msg:
+        if "not enough rights" in error_msg.lower():
             await update.message.reply_html(
                 "❌ <b>Permission Error!</b>\n\n"
-                "Make me an ADMIN in the channel with:\n"
+                "I need to be an ADMIN in the channel with:\n"
                 "• Ban Users permission\n\n"
-                "Then try again!"
+                f"Channel ID: <code>{Config.CHANNEL_ID}</code>\n\n"
+                "Please add me as admin and try again."
             )
-        elif "user not found" in error_msg:
+        elif "user not found" in error_msg.lower():
             await update.message.reply_html("❌ User not found!")
-        elif "not banned" in error_msg:
-            await update.message.reply_html("✅ User is not banned!")
-        elif "chat not found" in error_msg:
-            await update.message.reply_html("❌ Channel not found!")
+        elif "not banned" in error_msg.lower():
+            await update.message.reply_html(
+                "✅ User is not banned!\n\n"
+                f"User <code>{user_id}</code> is not banned from the channel."
+            )
+        elif "chat not found" in error_msg.lower():
+            await update.message.reply_html(
+                "❌ <b>Channel not found!</b>\n\n"
+                f"Channel ID <code>{Config.CHANNEL_ID}</code> is incorrect.\n"
+                "Please check your configuration."
+            )
         else:
-            await update.message.reply_html("❌ Failed to unban. Try again!")
+            await update.message.reply_html(
+                f"❌ <b>Error:</b> {error_msg[:100]}\n\n"
+                "Please try again or check the bot logs."
+            )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors in bot handlers."""
-    logger.error(f"Bot error: {context.error}", exc_info=True)
+    """Handle errors."""
+    logger.error(f"Update {update} caused error {context.error}", exc_info=True)
     
     if update and update.effective_message:
         try:
             await update.effective_message.reply_html(
                 "⚠️ <b>An error occurred!</b>\n"
-                "Please try again later."
+                "The developer has been notified."
             )
         except:
             pass
 
-# ========== Application Factory ==========
-def create_application() -> Application:
+# ========== Bot Setup ==========
+def create_application():
     """Create and configure the bot application."""
     logger.info("Creating bot application...")
     
-    # Configure with performance settings
-    builder = Application.builder()
-    builder.token(Config.BOT_TOKEN)
+    # Create application
+    app_builder = Application.builder().token(Config.BOT_TOKEN)
     
-    if Config.POOL_SIZE > 1:
-        builder.pool_size(Config.POOL_SIZE)
+    # Add persistence for development
+    if Config.DEVELOPMENT:
+        from telegram.ext import PersistenceDict
+        app_builder.persistence(PersistenceDict())
     
-    app_instance = builder.build()
+    application_instance = app_builder.build()
     
     # Register handlers
-    handlers = [
-        CommandHandler("start", start),
-        CommandHandler("help", help_command),
-        CommandHandler("unban", unban_command),
-        MessageHandler(
-            filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
-            handle_message
-        )
-    ]
+    application_instance.add_handler(CommandHandler("start", start))
+    application_instance.add_handler(CommandHandler("help", help_command))
+    application_instance.add_handler(CommandHandler("unban", unban_command))
+    application_instance.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_message
+    ))
     
-    for handler in handlers:
-        app_instance.add_handler(handler)
+    application_instance.add_error_handler(error_handler)
     
-    app_instance.add_error_handler(error_handler)
-    
-    logger.info(f"Bot application created with pool size: {Config.POOL_SIZE}")
-    return app_instance
+    logger.info("Bot handlers registered")
+    return application_instance
 
-# ========== Bot Initialization ==========
 def init_bot():
-    """Initialize the bot in a separate thread."""
+    """Initialize the bot."""
     global application, event_loop
     
     try:
-        logger.info("Initializing bot...")
+        logger.info("=== Bot Initialization Start ===")
         
         # Create event loop
         event_loop = asyncio.new_event_loop()
@@ -302,205 +320,166 @@ def init_bot():
         
         # Initialize
         event_loop.run_until_complete(application.initialize())
-        logger.info("Bot initialized")
+        logger.info("✅ Bot initialized")
         
-        # Setup webhook if enabled
-        if Config.USE_WEBHOOK and Config.WEBHOOK_URL:
-            webhook_url = f"{Config.WEBHOOK_URL}{Config.WEBHOOK_PATH}"
-            logger.info(f"Setting webhook to: {webhook_url}")
-            
-            event_loop.run_until_complete(
-                application.bot.set_webhook(
-                    webhook_url,
-                    max_connections=Config.MAX_CONNECTIONS,
-                    drop_pending_updates=True,
-                    allowed_updates=["message", "callback_query"]
-                )
-            )
-            logger.info("Webhook set successfully")
-            
-        elif Config.DEVELOPMENT:
-            # Start polling in development
-            logger.info("Starting polling (development mode)")
-            event_loop.create_task(application.run_polling(
+        # Start polling (simplest approach)
+        logger.info("🔄 Starting bot polling...")
+        
+        # Run polling in background
+        def run_polling():
+            asyncio.set_event_loop(event_loop)
+            event_loop.run_until_complete(application.run_polling(
                 drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"]
+                timeout=30,
+                pool_timeout=30,
+                connect_timeout=30,
+                read_timeout=30
             ))
-            
+        
+        # Start polling in separate thread
+        polling_thread = threading.Thread(target=run_polling, daemon=True)
+        polling_thread.start()
+        
+        logger.info("✅ Bot polling started")
+        
+        # Wait a bit for bot to connect
+        import time
+        time.sleep(2)
+        
+        # Test bot connection
+        bot_info = event_loop.run_until_complete(application.bot.get_me())
+        logger.info(f"🤖 Bot Info: @{bot_info.username} (ID: {bot_info.id})")
+        
+        logger.info("=== Bot Initialization Complete ===")
+        
     except Exception as e:
-        logger.error(f"Failed to initialize bot: {e}", exc_info=True)
+        logger.error(f"❌ Bot initialization failed: {e}", exc_info=True)
         sys.exit(1)
-
-def start_bot():
-    """Start bot initialization in background."""
-    thread = threading.Thread(target=init_bot, daemon=True, name="BotThread")
-    thread.start()
-    logger.info("Bot initialization started")
 
 # ========== Flask Routes ==========
 @app.route('/')
 def home():
-    """Home endpoint."""
+    """Home page."""
     return jsonify({
         "status": "online",
         "service": "Telegram Unban Bot",
         "version": "2.0.0",
         "timestamp": datetime.utcnow().isoformat(),
         "endpoints": {
-            "health": "/health",
-            "info": "/info",
-            "webhook": Config.WEBHOOK_PATH
+            "/health": "Health check",
+            "/info": "Bot info",
+            "/debug": "Debug info"
         }
     })
 
 @app.route('/health')
 def health():
-    """Health check endpoint."""
+    """Health check."""
     bot_status = "ready" if application and application.running else "starting"
-    
     return jsonify({
         "status": "healthy",
         "bot": bot_status,
-        "timestamp": datetime.utcnow().isoformat(),
-        "uptime": getattr(app, 'start_time', datetime.utcnow()).isoformat()
+        "timestamp": datetime.utcnow().isoformat()
     }), 200
 
 @app.route('/info')
 def info():
-    """Information endpoint."""
+    """Bot information."""
     return jsonify({
+        "bot_token_exists": bool(Config.BOT_TOKEN),
+        "bot_token_preview": Config.BOT_TOKEN[:10] + "..." if Config.BOT_TOKEN else "not_set",
         "channel_id": Config.CHANNEL_ID,
-        "webhook_enabled": Config.USE_WEBHOOK,
-        "webhook_url": Config.WEBHOOK_URL,
-        "pool_size": Config.POOL_SIZE,
-        "max_connections": Config.MAX_CONNECTIONS,
-        "mode": "development" if Config.DEVELOPMENT else "production"
+        "port": Config.PORT,
+        "mode": "development" if Config.DEVELOPMENT else "production",
+        "webhook_url": Config.WEBHOOK_URL or "not_set"
     })
 
-@app.route(Config.WEBHOOK_PATH, methods=['POST'])
-def webhook():
-    """Handle Telegram webhook updates."""
-    if not application:
-        return jsonify({"error": "Bot not initialized"}), 503
-    
+@app.route('/debug')
+def debug():
+    """Debug information."""
     try:
-        json_data = request.get_json()
-        if not json_data:
-            return jsonify({"error": "No data"}), 400
-        
-        # Process update
-        update = Update.de_json(json_data, application.bot)
-        
-        if event_loop and event_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                application.process_update(update),
-                event_loop
-            )
-            future.result(timeout=10)
-        else:
-            asyncio.run(application.process_update(update))
-        
-        return jsonify({"status": "ok"}), 200
-        
-    except asyncio.TimeoutError:
-        logger.warning("Webhook processing timeout")
-        return jsonify({"status": "processing"}), 202
-    except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/webhook/set', methods=['POST'])
-def set_webhook():
-    """Manually set webhook."""
-    if not Config.WEBHOOK_URL:
-        return jsonify({"error": "WEBHOOK_URL not configured"}), 400
-    
-    webhook_url = f"{Config.WEBHOOK_URL}{Config.WEBHOOK_PATH}"
-    
-    try:
-        if event_loop and event_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                application.bot.set_webhook(webhook_url),
-                event_loop
-            )
-            future.result(timeout=5)
-        else:
-            asyncio.run(application.bot.set_webhook(webhook_url))
+        bot_info = {}
+        if application and application.bot:
+            # Get bot info safely
+            try:
+                if event_loop and event_loop.is_running():
+                    # We can't run async code here easily, just return basic info
+                    bot_info = {"bot": "running", "event_loop": "active"}
+            except:
+                pass
         
         return jsonify({
-            "success": True,
-            "webhook_url": webhook_url
-        }), 200
-        
+            "python_version": sys.version,
+            "environment": dict(os.environ),
+            "working_directory": os.getcwd(),
+            "files_in_dir": os.listdir('.'),
+            "bot_info": bot_info,
+            "config": {
+                "bot_token_set": bool(Config.BOT_TOKEN),
+                "channel_id": Config.CHANNEL_ID,
+                "port": Config.PORT
+            }
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/webhook/delete', methods=['POST'])
-def delete_webhook():
-    """Delete webhook."""
+@app.route('/test-unban/<user_id>')
+def test_unban(user_id):
+    """Test unban endpoint (for debugging)."""
     try:
-        if event_loop and event_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                application.bot.delete_webhook(),
-                event_loop
-            )
-            future.result(timeout=5)
-        else:
-            asyncio.run(application.bot.delete_webhook())
+        from telegram import Bot
+        bot = Bot(Config.BOT_TOKEN)
         
-        return jsonify({"success": True}), 200
+        async def test():
+            try:
+                await bot.unban_chat_member(
+                    chat_id=Config.CHANNEL_ID,
+                    user_id=int(user_id),
+                    only_if_banned=True
+                )
+                return {"success": True, "user_id": user_id}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
         
+        result = asyncio.run(test())
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ========== Shutdown Handler ==========
-def shutdown_handler():
-    """Handle graceful shutdown."""
-    logger.info("Shutting down...")
-    
-    if application and event_loop:
-        try:
-            if event_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    application.stop(),
-                    event_loop
-                )
-                future.result(timeout=5)
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
-    
-    logger.info("Shutdown complete")
-
-# Register shutdown handler
-import atexit
-atexit.register(shutdown_handler)
-
-# ========== Application Startup ==========
+# ========== Main Execution ==========
 if __name__ == '__main__':
-    # Record startup time
-    app.start_time = datetime.utcnow()
+    print("\n" + "="*50)
+    print("🚀 Telegram Unban Bot Starting...")
+    print("="*50 + "\n")
     
-    # Start bot
-    start_bot()
+    # Create logs directory
+    os.makedirs('/app/logs', exist_ok=True)
     
-    # Start web server
-    logger.info(f"Starting server on {Config.HOST}:{Config.PORT}")
+    # Initialize bot
+    init_bot()
+    
+    # Start Flask server
+    print(f"\n🌐 Starting web server on {Config.HOST}:{Config.PORT}")
+    print("📝 Available endpoints:")
+    print(f"   http://{Config.HOST}:{Config.PORT}/")
+    print(f"   http://{Config.HOST}:{Config.PORT}/health")
+    print(f"   http://{Config.HOST}:{Config.PORT}/debug")
+    print(f"   http://{Config.HOST}:{Config.PORT}/test-unban/123456789")
+    print("\n🤖 Bot should be running. Try sending /start to your bot.")
+    print("="*50 + "\n")
     
     if Config.DEVELOPMENT:
-        # Development server
         app.run(
             host=Config.HOST,
             port=Config.PORT,
             debug=True,
-            use_reloader=False  # Disable reloader as it interferes with async
+            use_reloader=False
         )
     else:
-        # Production server
         serve(
             app,
             host=Config.HOST,
             port=Config.PORT,
-            threads=8,
-            connection_limit=Config.MAX_CONNECTIONS,
+            threads=4,
             channel_timeout=30
         )
