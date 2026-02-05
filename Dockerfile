@@ -13,7 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY app.py .
-COPY .env .  # Copy environment file if it exists
 
 # Run as non-root user
 RUN useradd -m -u 1000 botuser && \
